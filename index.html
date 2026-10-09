@@ -176,6 +176,10 @@ h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 }
 .hc::-webkit-outer-spin-button, .hc::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .hc:focus { outline: 2px solid var(--ans); outline-offset: 1px; }
+/* 请假框窄一点：它多数时候是 0，不该跟人力抢视线 */
+.hc.lvin { width: 2.6em; }
+/* 「在岗 N 人」：没请假时这里只是个「人」字，请了假才显示实际在岗几人 */
+.od { white-space: nowrap; }
 
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; }
 @media (max-width: 820px) { .charts { grid-template-columns: 1fr; } }
@@ -197,6 +201,11 @@ svg { display: block; width: 100%; height: auto; }
    人力那行留着（截图里要看得到人力是多少），只是让输入框看起来像普通文字。 */
 body.shot .note, body.shot .btnrow { display: none !important; }
 body.shot .hc { border-color: transparent; background: transparent; pointer-events: none; width: 2.4em; }
+/* 截图里请假 0 没有信息量，藏掉「请假 0」只留人力；真请了假才显示出来。
+   用 :not([value=""]) 不行 —— value 属性和用户输入后的实际值会脱节，
+   所以靠 JS 在截图前给没请假的框加 .lv0。 */
+body.shot .lvin.lv0, body.shot .lvlbl.lv0 { display: none !important; }
+body.shot .hc.lvin { width: 2em; }
 
 details { margin-top: 11px; }
 summary { cursor: pointer; color: var(--ink-2); font-size: 12px; padding: 3px 0; }
@@ -523,7 +532,8 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     }).join('');
   }
 
-  /* 人均接起：区间里按「有话务的天数」取日均，单日就是它本身 */
+  /* 人均接起：区间里按「有话务的天数」取日均，单日就是它本身。
+     hc 传的是**在岗人力**（编制 - 请假），由 onDuty() 算好再传进来。 */
   function perAgent(ans, hc, ad) {
     if (!hc || !ad) return null;
     return Math.round(ans / hc / ad * 100) / 100;
@@ -534,6 +544,14 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     if (Object.prototype.hasOwnProperty.call(P.hc, k)) return P.hc[k] === '' ? 0 : +P.hc[k];
     return +(dflt || 0);
   }
+  // 请假人力，默认 0。没填过就是 0，不像 hc 那样有配置里的默认值。
+  function getLv(name, ch) {
+    var v = P.lv[name + '|' + ch];
+    return v === '' || v === undefined ? 0 : +v;
+  }
+  /* 在岗人力 = 编制 - 请假，夹在 [0, 编制] 之间。
+     请假填得比编制还多是手滑，按 0 算并在界面上标出来，不要算出负数或 Infinity。 */
+  function onDuty(hc, lv) { return Math.max(0, hc - Math.max(0, lv)); }
 
   /* 顶端 4px 圆角、底边贴基线 */
   function bar(x, y, w, h, r) {
@@ -796,13 +814,23 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
       };
       var kpiPA = function (k, ch, ans) {
         var hc = getHc(p.name, ch, p.hc[ch]);
-        var v = perAgent(ans, hc, b.ad);
+        var lv = getLv(p.name, ch);
+        var od = onDuty(hc, lv);
+        var v = perAgent(ans, od, b.ad);
         var id = 'pa' + pi + ch;
+        var dd = ' data-ch="' + ch + '" data-pa="' + id + '" data-ans="' + ans +
+                 '" data-ad="' + b.ad + '" data-p="' + esc(p.name) + '"';
+        // 人力和请假并排。请假默认 0，填了才从人力里扣，人均按在岗人力算。
+        // 「在岗 N 人」只在真请了假时才出现，平时不占地方。
         return '<div class="kpi"><div class="k">' + k + (days.length > 1 ? '（日均）' : '') +
           '</div><div class="v" id="' + id + '">' + (v === null ? '—' : v) + '</div>' +
           '<div class="hcrow">人力 <input class="hc" type="number" min="0" step="1" value="' +
-          (hc || '') + '" data-ch="' + ch + '" data-pa="' + id + '" data-ans="' + ans +
-          '" data-ad="' + b.ad + '" aria-label="' + esc(p.name) + ch + '人力" placeholder="—"> 人</div></div>';
+          (hc || '') + '"' + dd + ' aria-label="' + esc(p.name) + ch + '人力" placeholder="—">' +
+          ' <span class="lvlbl' + (lv > 0 ? '' : ' lv0') + '">请假</span> ' +
+          '<input class="hc lvin' + (lv > 0 ? '' : ' lv0') + '" type="number" min="0" step="1" value="' +
+          (lv || '') + '"' + dd + ' aria-label="' + esc(p.name) + ch + '请假人力" placeholder="0">' +
+          ' <span class="od" id="od' + pi + ch + '">' +
+          (lv > 0 ? '在岗 ' + od + ' 人' : '人') + '</span></div></div>';
       };
 
       el.innerHTML =
@@ -844,15 +872,32 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
         P.split[p.group] = !P.split[p.group]; savePrefs(); render();
       });
 
-      // 人力就地改：输入时立刻更新人均数字，离开输入框（或回车）时才存，省得每敲一下都写一次
+      // 人力/请假就地改：输入时立刻更新人均数字，离开输入框（或回车）时才存，
+      // 省得每敲一下都写一次 localStorage。
+      // 两个框算的是同一个人均，所以不管动哪个，都把这一对重新读一遍再算，
+      // 而不是只用当前这个框的值 —— 否则改请假时会把人力当成 0。
       el.querySelectorAll('.hc').forEach(function (inp) {
+        var isLv = inp.classList.contains('lvin');
         var apply = function (persist) {
-          var hc = inp.value === '' ? 0 : +inp.value;
-          var v = perAgent(+inp.dataset.ans, hc, +inp.dataset.ad);
+          var row = inp.parentNode;
+          var hcIn = row.querySelector('.hc:not(.lvin)');
+          var lvIn = row.querySelector('.lvin');
+          var hc = hcIn && hcIn.value !== '' ? +hcIn.value : 0;
+          var lv = lvIn && lvIn.value !== '' ? +lvIn.value : 0;
+          var od = onDuty(hc, lv);
+          var v = perAgent(+inp.dataset.ans, od, +inp.dataset.ad);
           var tgt = document.getElementById(inp.dataset.pa);
           if (tgt) tgt.textContent = (v === null ? '—' : v);
+          var odEl = document.getElementById('od' + inp.dataset.pa.replace(/^pa/, ''));
+          if (odEl) odEl.textContent = (lv > 0 ? '在岗 ' + od + ' 人' : '人');
+          // 截图模式要藏掉「请假 0」，靠这个类标记；边敲边更新，免得截图时还是旧状态
+          var lbl = row.querySelector('.lvlbl');
+          if (lvIn) lvIn.classList.toggle('lv0', !(lv > 0));
+          if (lbl) lbl.classList.toggle('lv0', !(lv > 0));
           if (persist) {
-            P.hc[p.name + '|' + inp.dataset.ch] = inp.value === '' ? '' : hc;
+            var k = p.name + '|' + inp.dataset.ch;
+            if (isLv) P.lv[k] = inp.value === '' ? '' : Math.max(0, +inp.value);
+            else P.hc[k] = inp.value === '' ? '' : hc;
             savePrefs();
           }
         };
@@ -1032,7 +1077,8 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     '接起量、在线漏接量取自报表系统「客户来访数据汇总表（半小时）」；' +
     '电话漏接量另算 ＝ 排队放弃 ＋ 其他漏接，合计以电话报表的 userAbandonCnt ＋ otherAbandonCnt 为准。<br>' +
     '周按一～日切；跨多天时表里是区间内逐时段的累加，人均接起改按「有话务的天数」取日均。<br>' +
-    '班表人力可直接在页面上填，只存在这台机器的浏览器里（换机器或清了站点数据要重填），不影响已抓取的数据。<br>' +
+    '班表人力和请假人力可直接在页面上填：人均接起按<b>在岗人力＝人力－请假</b>算，请假默认 0。' +
+    '两个数只存在这台机器的浏览器里（换机器或清了站点数据要重填），不影响已抓取的数据。<br>' +
     '区间条上的数字是该区间全部牌照的漏接总量，点击可切换；接通率低于 ' +
     (D.alert * 100).toFixed(0) + '% 的时段标红。';
 
