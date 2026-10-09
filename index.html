@@ -1047,8 +1047,11 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
         .catch(function (e) { toast('截 ' + nm + ' 失败：' + e.message); })
         .then(function () { i++; setTimeout(next, 120); });
     };
-    // 等一帧，让 .shot 的样式先生效再开截，否则第一张可能还带着备注框
-    requestAnimationFrame(function () { requestAnimationFrame(next); });
+    // 等一下让 .shot 的样式先生效再开截，否则第一张可能还带着备注框。
+    // 不用 requestAnimationFrame：页面在后台标签页时浏览器会把它暂停，
+    // 那样整批就卡在这儿不动、按钮一直是禁用状态（实测无头模式下它一次都不触发）。
+    // setTimeout 不受这个限制，照常走完。
+    setTimeout(next, 60);
   };
 
   document.getElementById('copyday').onclick = function (ev) {
