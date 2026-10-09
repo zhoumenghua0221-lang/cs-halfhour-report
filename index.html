@@ -197,9 +197,39 @@ svg { display: block; width: 100%; height: auto; }
 }
 .note b { font-family: var(--mono); color: var(--ink); }
 
+/* ── 每块的「说明」：把每天要手写的那段话直接做进面板，所以它也进截图 ──
+   和 .note 相反：.note 是给我自己看的口径脚注，截图时藏掉；
+   .sum 是给别人看的结论，截图时必须留着，而且要是**纯文字**。
+   编辑用的输入框另放在 .sumedit 里、截图时整行藏掉 —— 这样 html2canvas
+   截到的永远是 div 里的文字，不依赖它渲染 input/textarea 的值（那条路不保险）。 */
+.sum {
+  background: var(--panel); border-left: 3px solid var(--ans);
+  border-radius: 0 9px 9px 0; padding: 9px 12px; margin-top: 11px;
+  font-size: 12.5px; line-height: 1.75; color: var(--ink-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.sum .sh { color: var(--ink); font-weight: 600; }
+.sum b { font-family: var(--mono); color: var(--ink); font-weight: 600; }
+.sum .lo { color: var(--miss-ink); }
+/* 口径小字：解释漏接取的是 ivr 日报真值，和上表逐格加总差几通 */
+.sum .fine { color: var(--ink-3); font-size: 11.5px; }
+.sumedit { display: flex; align-items: flex-start; gap: 7px; margin-top: 6px; flex-wrap: wrap; }
+.sumedit label { color: var(--ink-3); font-size: 11.5px; white-space: nowrap; padding-top: 4px; }
+/* 合并面板（TBAU+TFNZ）的编辑区每个牌照一行，行首标出是哪个牌照 */
+.sumedit label.un { color: var(--ink-2); font-weight: 600; min-width: 3.6em; }
+.sumedit .why {
+  flex: 1 1 320px; min-width: 200px; font: inherit; font-size: 12px;
+  font-family: var(--sans); line-height: 1.6; resize: vertical; overflow: hidden;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line-2);
+  border-radius: 7px; padding: 4px 7px;
+}
+.sumedit .why:focus, .sumedit .hc:focus { outline: 2px solid var(--ans); outline-offset: 1px; }
+
 /* 截图模式：藏掉备注和复制按钮这些只在屏幕上有用的东西，
    人力那行留着（截图里要看得到人力是多少），只是让输入框看起来像普通文字。 */
 body.shot .note, body.shot .btnrow { display: none !important; }
+/* 说明的「编辑区」只在屏幕上用，截图里留纯文字那块（.sum）。 */
+body.shot .sumedit { display: none !important; }
 body.shot .hc { border-color: transparent; background: transparent; pointer-events: none; width: 2.4em; }
 /* 截图里请假 0 没有信息量，藏掉「请假 0」只留人力；真请了假才显示出来。
    用 :not([value=""]) 不行 —— value 属性和用户输入后的实际值会脱节，
@@ -285,6 +315,7 @@ footer { color: var(--ink-3); font-size: 11.5px; margin-top: 22px; line-height: 
     </div>
     <div class="dateline" style="margin-top:7px">
       <button class="btn" id="copyday">复制本区间全部牌照</button>
+      <button class="btn" id="copysum">复制全部说明</button>
       <button class="btn" id="copyall">复制逐日全部数据</button>
       <button class="btn" id="shotbtn" aria-pressed="false">截图模式</button>
       <button class="btn" id="shotall">一键截图（每牌照一张）</button>
@@ -325,6 +356,8 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
 
 (function () {
   var A = 0, PM = 1, OA = 2, OM = 3, PIN = 4, OIN = 5;
+  // mp（电话漏接构成）里的下标：[其他漏接, 排队放弃, 其他漏接日报真值, 是否已定位到格, 缺口, ivr日报合计]
+  var IVR = 5;
   var app = document.getElementById('app');
   var tip = document.getElementById('tip');
 
@@ -349,13 +382,16 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
   var LS = 'gcs.halfhour.prefs';
   // lv = 请假人力，默认 0。和 hc 分开存：hc 是编制（基本不动），lv 是实际缺勤（常变）。
   // 人均按在岗人力算 = hc - lv，见 perAgent()。
-  var P = { hc: {}, lv: {}, split: {}, shot: false };
+  // ml = 邮件咨询量，why = 接通率低时的原因说明。这两个都按「牌照|区间」存，
+  // 因为它们是一天一个数、一天一句话，不像人力那样长期不变。
+  var P = { hc: {}, lv: {}, ml: {}, why: {}, split: {}, shot: false };
   try {
     var raw = localStorage.getItem(LS);
     if (raw) {
       var o = JSON.parse(raw);
       if (o && typeof o === 'object') {
         P.hc = o.hc || {}; P.lv = o.lv || {};
+        P.ml = o.ml || {}; P.why = o.why || {};
         P.split = o.split || {}; P.shot = !!o.shot;
       }
     }
@@ -544,14 +580,174 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     if (Object.prototype.hasOwnProperty.call(P.hc, k)) return P.hc[k] === '' ? 0 : +P.hc[k];
     return +(dflt || 0);
   }
-  // 请假人力，默认 0。没填过就是 0，不像 hc 那样有配置里的默认值。
-  function getLv(name, ch) {
-    var v = P.lv[name + '|' + ch];
+  // 请假人力，默认 0。**按「牌照|渠道|区间」存** —— 请假是一天一个数，
+  // 不像编制那样长期不变。原来按「牌照|渠道」存，结果 9/29 填了请假 1，
+  // 切到 10/08 还显示请假 1，说明里就会写出当天根本没发生的事。
+  // 默认 0 意味着绝大多数日子什么都不用填。
+  function getLv(name, ch, rk) {
+    var v = P.lv[name + '|' + ch + '|' + rk];
     return v === '' || v === undefined ? 0 : +v;
   }
   /* 在岗人力 = 编制 - 请假，夹在 [0, 编制] 之间。
      请假填得比编制还多是手滑，按 0 算并在界面上标出来，不要算出负数或 Infinity。 */
   function onDuty(hc, lv) { return Math.max(0, hc - Math.max(0, lv)); }
+
+  /* ── 每块的说明（就是每天要手写发群里的那段话）────────────────
+     为什么做进页面而不是让人另写：那段话里**除了原因之外全是能从数据直接算出来的**
+     —— 总量、接起、接通率、人力、请假、漏接集中在哪个时段。手抄既慢又容易抄错
+     （对过 9/29 那份：TBSG 写成 113/85.0%，实际 112/85.7%）。
+     算得出的部分自动填，只把「为什么」留给人填。
+
+     口径说明（和表格不是同一个数，这点必须清楚）：
+     · 「咨询总量」= 接起 + 漏接，漏接取 **ivr 日报真值**（mp[IVR]），不是上表的逐格加总。
+       理由：发出去的说明是对外口径，要和报表系统的日报对得上；逐格加总是
+       「能定位到时段的那部分」，天然可能偏少（见 noteHtml 那段）。
+       全量 190 个牌照日验过：ivr 真值 **从不小于** 逐格加总，所以这样算不会把总量算少。
+     · 两者不等时在说明里用小字点出差几通，不藏着。 */
+  var SUM_EXPLAIN = 0.90;   // 接通率低于它才需要写原因说明（和标红用的 D.alert 是两回事）
+
+  // 说明里的邮件量/原因按「牌照|区间」存：它们一天一个值，不像人力那样长期不变
+  function rangeKey(days) {
+    return days.length ? days[0] + '~' + days[days.length - 1] : '';
+  }
+  function getMl(name, rk) {
+    var v = P.ml[name + '|' + rk];
+    return v === '' || v === undefined ? null : +v;
+  }
+  function getWhy(name, rk) { return P.why[name + '|' + rk] || ''; }
+
+  /* 漏接集中在哪几个时段：按漏接数从多到少取，取到累计过半就停，最多 3 个。
+     「过半」是为了只说真正集中的那几格 —— 平摊在十几个时段时说哪个都没意义，
+     这时它会返回 3 个也凑不满一半，调用方据此改口说「分散」。 */
+  function topSlots(b, mi, ini) {
+    var items = [];
+    b.r.forEach(function (r, i) { if (r[mi] > 0) items.push({ i: i, n: r[mi], on: !!r[ini] }); });
+    items.sort(function (a, c) { return c.n - a.n || a.i - c.i; });
+    var tot = items.reduce(function (s, x) { return s + x.n; }, 0);
+    var out = [], acc = 0;
+    for (var k = 0; k < items.length && k < 3; k++) {
+      out.push(items[k]); acc += items[k].n;
+      if (acc * 2 >= tot) break;
+    }
+    return { list: out, acc: acc, tot: tot };
+  }
+
+  /* 一个牌照单元的说明行。返回 [{t: 文本, lo: 是否标红}]。
+     「单元」不等于「面板」：TBAU+TFNZ 合并成一个面板，但说明要分成两段写
+     —— 发出去的那份是按牌照一条条列的，合在一起等于把两个牌照的量揉成一个数。 */
+  function unitLines(u, rk) {
+    var b = u.b, t = b.t, mp = b.mp;
+    var L = [];
+    var one = function (lab, ans, missTrue) {
+      var tot = ans + missTrue;
+      var r = tot ? ans / tot : null;
+      L.push({ t: '- ' + lab + '咨询总量：' + tot + '　接起量：' + ans +
+                  '　接通率 ' + (r === null ? '—' : (r * 100).toFixed(1) + '%'),
+               lo: r !== null && r < SUM_EXPLAIN });
+      return r;
+    };
+    // 电话漏接取 ivr 日报真值；在线报表那列本来就是准的，直接用
+    var phoneMiss = Math.max(t[PM], mp[IVR]);
+    var pr = one('电话', t[A], phoneMiss);
+    var or_ = one('在线', t[OA], t[OM]);
+    var ml = getMl(u.name, rk);
+    if (ml !== null) L.push({ t: '- 邮件咨询总量：' + ml });
+
+    var hp = getHc(u.name, 'phone', u.hc.phone), lp = getLv(u.name, 'phone', rk);
+    var ho = getHc(u.name, 'online', u.hc.online), lo = getLv(u.name, 'online', rk);
+    var hcTxt = function (lab, hc, lv) {
+      if (!hc) return '';
+      return lab + '有效人力 ' + onDuty(hc, lv) + ' 人' +
+             (lv > 0 ? '（编制 ' + hc + '，请假 ' + lv + '）' : '，请假 0 人');
+    };
+    var parts = [hcTxt('电话', hp, lp), hcTxt('在线', ho, lo)].filter(Boolean);
+    if (parts.length) L.push({ t: '- ' + parts.join('；') });
+
+    /* 原因说明：只在接通率低于 90% 时出现（和人工写的习惯一致）。
+       自动给的只有**事实**：漏接集中在哪几格、那几格是不是非服务时段、当天有没有请假。
+       「为什么」留给人填 —— 我不替人断因，写死一句「坐席均在通话中」是在替人编理由。 */
+    var low = [];
+    if (pr !== null && pr < SUM_EXPLAIN) low.push(['电话', phoneMiss, PM, PIN]);
+    if (or_ !== null && or_ < SUM_EXPLAIN) low.push(['在线', t[OM], OM, OIN]);
+    low.forEach(function (c) {
+      var lab = c[0], total = c[1], ts = topSlots(b, c[2], c[3]);
+      var s = lab + '接通率说明：漏接 ' + total + ' 通';
+      if (!ts.list.length) {
+        s += '（没有定位到具体时段）';
+      } else if (ts.acc * 2 >= ts.tot) {
+        s += '，主要集中在 ' + ts.list.map(function (x) {
+          return D.labels[x.i] + '（' + x.n + ' 通' + (x.on ? '' : '，非服务时段') + '）';
+        }).join('、');
+      } else {
+        s += '，分散在多个时段，最多的是 ' +
+             D.labels[ts.list[0].i] + '（' + ts.list[0].n + ' 通）';
+      }
+      // 漏接比逐格加总多的那部分定位不到时段，说明里要交代，不能让人以为上面列全了
+      if (lab === '电话' && phoneMiss > t[PM]) {
+        s += '；其中 ' + (phoneMiss - t[PM]) + ' 通定位不到具体时段';
+      }
+      if (lp > 0 || lo > 0) {
+        s += '。当天' + (lp > 0 ? '电话请假 ' + lp + ' 人' : '') +
+             (lp > 0 && lo > 0 ? '、' : '') + (lo > 0 ? '在线请假 ' + lo + ' 人' : '');
+      }
+      s += '。';
+      var why = getWhy(u.name, rk);
+      if (why) s += why.replace(/\s+$/, '');
+      L.push({ t: s, lo: true });
+    });
+    return L;
+  }
+
+  /* 一个面板里要分开写说明的牌照单元。合并面板（TBAU+TFNZ）拆成两个，其余就它自己。
+     合并面板的成员没有各自的默认人力（配置里只给了整块的），所以 hc 传空对象 ——
+     没填过就不出人力那行，而不是把整块的人力安到单个牌照头上。 */
+  function sumUnits(p) {
+    if (p.multi && p.b.m && p.b.m.length > 1) {
+      return p.b.m.map(function (m) { return { name: m.n, b: m, hc: {} }; });
+    }
+    return [{ name: p.name, b: p.b, hc: p.hc || {} }];
+  }
+
+  function dayLabel(days) {
+    return days.length === 1 ? days[0] + ' 周' + wdOf(days[0])
+                             : rangeKey(days) + '（' + days.length + ' 天）';
+  }
+
+  function sumText(p, days) {
+    var rk = rangeKey(days), us = sumUnits(p);
+    var out = [];
+    us.forEach(function (u, i) {
+      out.push((i ? '\n' : '') + u.name + '　' + dayLabel(days));
+      unitLines(u, rk).forEach(function (l) { out.push(l.t); });
+    });
+    return out.join('\n');
+  }
+
+  function sumHtml(p, days) {
+    var rk = rangeKey(days), us = sumUnits(p);
+    var body = us.map(function (u) {
+      return '<div class="sh">' + esc(u.name + '　' + dayLabel(days)) + '</div>' +
+        unitLines(u, rk).map(function (l) {
+          return '<div' + (l.lo ? ' class="lo"' : '') + '>' + esc(l.t) + '</div>';
+        }).join('');
+    }).join('');
+    var edits = us.map(function (u) {
+      var ml = getMl(u.name, rk);
+      return '<div class="sumedit" data-u="' + esc(u.name) + '">' +
+        (us.length > 1 ? '<label class="un">' + esc(u.name) + '</label>' : '') +
+        '<label>邮件量</label>' +
+        '<input class="hc ml" type="number" min="0" step="1" value="' +
+          (ml === null ? '' : ml) + '" placeholder="—" aria-label="' +
+          esc(u.name) + '邮件咨询总量">' +
+        '<label>原因说明</label>' +
+        '<textarea class="why" rows="1" aria-label="' + esc(u.name) + '接通率原因说明" ' +
+          'placeholder="接通率低于 90% 时补一句原因">' + esc(getWhy(u.name, rk)) + '</textarea>' +
+        '</div>';
+    }).join('');
+    return '<div class="sum">' + body + '</div>' + edits +
+      '<div class="sumedit"><button class="btn cpsum">复制这段说明</button></div>';
+  }
+
 
   /* 顶端 4px 圆角、底边贴基线 */
   function bar(x, y, w, h, r) {
@@ -799,6 +995,7 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
 
     panels.forEach(function (p, pi) {
       var b = p.b, t = b.t;
+      var rk = rangeKey(days);
       var ymax = 4;
       b.r.forEach(function (r) { ymax = Math.max(ymax, r[A] + r[PM], r[OA] + r[OM]); });
       var pr = rate(t[A], t[PM]), or_ = rate(t[OA], t[OM]);
@@ -814,7 +1011,7 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
       };
       var kpiPA = function (k, ch, ans) {
         var hc = getHc(p.name, ch, p.hc[ch]);
-        var lv = getLv(p.name, ch);
+        var lv = getLv(p.name, ch, rk);
         var od = onDuty(hc, lv);
         var v = perAgent(ans, od, b.ad);
         var id = 'pa' + pi + ch;
@@ -853,6 +1050,7 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
           '<span class="hint">制表符分隔，粘进 Excel / 表格自动分列' +
           (p.multi ? '；按牌照分行' : '') + '</span>' +
         '</div>' +
+        sumHtml(p, days) +
         table(p) + noteHtml(p) +
         '<div class="charts">' +
           '<div class="ch" data-k="p"><div class="ct">电话</div>' + lgd() +
@@ -872,11 +1070,64 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
         P.split[p.group] = !P.split[p.group]; savePrefs(); render();
       });
 
+      /* 说明块：数字全是算出来的，改了人力/请假/邮件量都要重算一遍。
+         只换 .sum 那一块的内容，不整页 render() —— render 会重建输入框、
+         把光标和正在敲的半截字顶掉。 */
+      var redrawSum = function () {
+        var box = el.querySelector('.sum');
+        if (!box) return;
+        var tmp = document.createElement('div');
+        tmp.innerHTML = sumHtml(p, days);
+        box.innerHTML = tmp.querySelector('.sum').innerHTML;
+      };
+
+      // 「原因说明」输入框高度跟着内容长 —— 写两行就显示两行，不用自己拖
+      var grow = function (ta) {
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+      };
+
+      /* 编辑区可能有多行（合并面板按牌照各一行），每行用 data-u 标是哪个牌照。
+         两个框都是「边敲边更新说明、离开才存盘」。 */
+      el.querySelectorAll('.sumedit[data-u]').forEach(function (row) {
+        var un = row.dataset.u;
+        var mlIn = row.querySelector('.ml');
+        if (mlIn) {
+          var mlApply = function (persist) {
+            P.ml[un + '|' + rk] = mlIn.value === '' ? '' : Math.max(0, +mlIn.value);
+            redrawSum();
+            if (persist) savePrefs();
+          };
+          mlIn.addEventListener('input', function () { mlApply(false); });
+          mlIn.addEventListener('change', function () { mlApply(true); });
+        }
+        var whyIn = row.querySelector('.why');
+        if (whyIn) {
+          grow(whyIn);
+          var whyApply = function (persist) {
+            P.why[un + '|' + rk] = whyIn.value;
+            grow(whyIn); redrawSum();
+            if (persist) savePrefs();
+          };
+          whyIn.addEventListener('input', function () { whyApply(false); });
+          whyIn.addEventListener('change', function () { whyApply(true); });
+          whyIn.addEventListener('blur', function () { whyApply(true); });
+        }
+      });
+
+      var cs = el.querySelector('.cpsum');
+      if (cs) cs.addEventListener('click', function (ev) {
+        var txt = sumText(p, days);
+        copy(txt, ev.currentTarget, txt.split('\n').length);
+      });
+
       // 人力/请假就地改：输入时立刻更新人均数字，离开输入框（或回车）时才存，
       // 省得每敲一下都写一次 localStorage。
       // 两个框算的是同一个人均，所以不管动哪个，都把这一对重新读一遍再算，
       // 而不是只用当前这个框的值 —— 否则改请假时会把人力当成 0。
-      el.querySelectorAll('.hc').forEach(function (inp) {
+      // 选择器限定在 .hcrow 内：说明区的「邮件量」框也借用了 .hc 的样式，
+      // 但它没有 data-pa，混进来会在 dataset.pa.replace 上抛错。
+      el.querySelectorAll('.hcrow .hc').forEach(function (inp) {
         var isLv = inp.classList.contains('lvin');
         var apply = function (persist) {
           var row = inp.parentNode;
@@ -894,12 +1145,15 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
           var lbl = row.querySelector('.lvlbl');
           if (lvIn) lvIn.classList.toggle('lv0', !(lv > 0));
           if (lbl) lbl.classList.toggle('lv0', !(lv > 0));
-          if (persist) {
-            var k = p.name + '|' + inp.dataset.ch;
-            if (isLv) P.lv[k] = inp.value === '' ? '' : Math.max(0, +inp.value);
-            else P.hc[k] = inp.value === '' ? '' : hc;
-            savePrefs();
-          }
+          // 说明块里也写着人力和请假，跟着一起重算。
+          // P 立刻更新（说明块是从 P 读的，不然边敲边看会显示上一次的值），
+          // 只有写进 localStorage 才等到离开输入框 —— 省得每敲一下存一次。
+          // 请假按区间存（一天一个数），编制不按（长期不变），所以两个 key 不一样。
+          if (isLv) P.lv[p.name + '|' + inp.dataset.ch + '|' + rk] =
+            inp.value === '' ? '' : Math.max(0, +inp.value);
+          else P.hc[p.name + '|' + inp.dataset.ch] = inp.value === '' ? '' : hc;
+          redrawSum();
+          if (persist) savePrefs();
         };
         inp.addEventListener('input', function () { apply(false); });
         inp.addEventListener('change', function () { apply(true); });
@@ -1062,6 +1316,16 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     });
     copy(toTsv(rows), ev.currentTarget, rows.length - 1);
   };
+  /* 「复制全部说明」：五块的说明连起来，就是可以直接发群里的那整段。
+     开头带一行日期，和人工写的那份格式一致。 */
+  document.getElementById('copysum').onclick = function (ev) {
+    var days = curDays();
+    if (!days.length) { toast('当前区间没有数据'); return; }
+    var head = (days.length === 1 ? days[0] : rangeKey(days)) + ' 接通率说明';
+    var txt = [head].concat(panels.map(function (p) { return sumText(p, days); })).join('\n\n');
+    copy(txt, ev.currentTarget, txt.split('\n').length);
+  };
+
   document.getElementById('copyall').onclick = function (ev) {
     var rows = [TSV_HEAD.slice()];
     D.days.forEach(function (d) {
@@ -1082,6 +1346,9 @@ var D = {"days":["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-05
     '周按一～日切；跨多天时表里是区间内逐时段的累加，人均接起改按「有话务的天数」取日均。<br>' +
     '班表人力和请假人力可直接在页面上填：人均接起按<b>在岗人力＝人力－请假</b>算，请假默认 0。' +
     '两个数只存在这台机器的浏览器里（换机器或清了站点数据要重填），不影响已抓取的数据。<br>' +
+    '每块的<b>说明</b>会自动写好（总量、接起、接通率、人力、漏接集中时段），截图里带着；' +
+    '只有邮件量和「为什么」要人填。说明里的咨询总量＝接起＋<b>ivr 日报口径</b>的漏接，' +
+    '可能比上面逐时段表的漏接多几通（那几通定位不到具体时段，说明里会注明）。<br>' +
     '区间条上的数字是该区间全部牌照的漏接总量，点击可切换；接通率低于 ' +
     (D.alert * 100).toFixed(0) + '% 的时段标红。';
 
