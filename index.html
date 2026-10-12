@@ -384,7 +384,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
   // 人均按在岗人力算 = hc - lv，见 perAgent()。
   // ml = 邮件咨询量，why = 接通率低时的原因说明。这两个都按「牌照|区间」存，
   // 因为它们是一天一个数、一天一句话，不像人力那样长期不变。
-  var P = { hc: {}, lv: {}, ml: {}, why: {}, split: {}, shot: false };
+  var P = { hc: {}, lv: {}, ml: {}, why: {}, split: {} };
   try {
     var raw = localStorage.getItem(LS);
     if (raw) {
@@ -392,10 +392,18 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       if (o && typeof o === 'object') {
         P.hc = o.hc || {}; P.lv = o.lv || {};
         P.ml = o.ml || {}; P.why = o.why || {};
-        P.split = o.split || {}; P.shot = !!o.shot;
+        P.split = o.split || {};
       }
     }
   } catch (e) {}
+
+  /* 截图模式：**只活在这一次浏览里，不记忆**。
+     它把人力框设成 pointer-events:none、把「请假 0」整个 display:none，好让截图
+     看起来像纯文字。这些对「截图」是对的，对「填数」是致命的 —— 一旦上次退出时
+     停在截图模式，下次打开人力框就点不动、请假框还看不见，人会以为功能坏了
+     （实际发生过：用户报「人力不能改、请假不能填」）。
+     所以它不写进 P、不从 localStorage 读回，每次打开都在正常模式。 */
+  var SHOT = false;
   function savePrefs() { try { localStorage.setItem(LS, JSON.stringify(P)); } catch (e) {} }
 
   function esc(s) {
@@ -1251,11 +1259,11 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
 
   var shotBtn = document.getElementById('shotbtn');
   function applyShot() {
-    document.body.classList.toggle('shot', P.shot);
-    shotBtn.setAttribute('aria-pressed', P.shot ? 'true' : 'false');
-    shotBtn.textContent = P.shot ? '退出截图模式' : '截图模式';
+    document.body.classList.toggle('shot', SHOT);
+    shotBtn.setAttribute('aria-pressed', SHOT ? 'true' : 'false');
+    shotBtn.textContent = SHOT ? '退出截图模式' : '截图模式';
   }
-  shotBtn.onclick = function () { P.shot = !P.shot; savePrefs(); applyShot(); };
+  shotBtn.onclick = function () { SHOT = !SHOT; applyShot(); };
 
   /* 一键截图：每个牌照一张 PNG，范围就是整块 .panel —— 上边是带牌照色的面板顶线
      和表头那条色线，下边到两张图表为止，正好是「从表头有颜色的地方到组装图」。
@@ -1283,7 +1291,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
     if (typeof html2canvas !== 'function') { toast('截图组件没加载成功'); return; }
     var els = [].slice.call(app.querySelectorAll('.panel'));
     if (!els.length) { toast('当前区间没有数据'); return; }
-    var wasShot = P.shot, old = btn.textContent, i = 0;
+    var wasShot = SHOT, old = btn.textContent, i = 0;
     document.body.classList.add('shot');
     btn.disabled = true;
     var bg = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
