@@ -197,6 +197,22 @@ svg { display: block; width: 100%; height: auto; }
 }
 .note b { font-family: var(--mono); color: var(--ink); }
 
+/* ── 异常提示：放在页面最下面，**不进截图** ──────────────────
+   为什么要有：数据是自动出的，人不再逐格看数，对数字的敏感度会下降。
+   除了「低于 90% 标红」这条固定线，这里再主动挑出几类值得看一眼的波动。
+   没检出就整块不显示 —— 平静的日子不该有噪音。 */
+#alerts { margin: 14px 0 0; }
+#alerts .ah { font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+#alerts ul { margin: 0; padding-left: 18px; }
+#alerts li { font-size: 12.5px; color: var(--ink); margin: 3px 0; line-height: 1.55; }
+#alerts .tag {
+  display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 999px;
+  background: var(--miss-bg); border: 1px solid var(--miss-line);
+  color: var(--ink-2); margin-right: 5px;
+}
+#alerts b { font-family: var(--mono); }
+body.shot #alerts { display: none !important; }
+
 /* ── 每块的「说明」：把每天要手写的那段话直接做进面板，所以它也进截图 ──
    和 .note 相反：.note 是给我自己看的口径脚注，截图时藏掉；
    .sum 是给别人看的结论，截图时必须留着，而且要是**纯文字**。
@@ -326,6 +342,7 @@ footer { color: var(--ink-3); font-size: 11.5px; margin-top: 22px; line-height: 
     <div class="strip-wrap"><div class="strip" id="strip" role="tablist" aria-label="选择区间"></div></div>
   </header>
   <main id="app"></main>
+  <section id="alerts"></section>
   <footer id="foot"></footer>
 </div>
 <div id="tip" role="status"></div>
@@ -578,6 +595,132 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
                  svc: svc, svcn: svcn });
     });
     return out;
+  }
+
+  /* ── 异常检测 ────────────────────────────────────────────
+     数据既然是自动出的，人就不会再逐格盯着看，对数字的敏感度会下降。
+     除了「接通率低于 90% 标红」这条固定线，这里再主动挑几类值得看一眼的。
+
+     基线怎么来：同一个 (牌照, 渠道, 时段) 取**全部历史同时段**的中位数和 MAD
+     （绝对偏差的中位数）。用中位数不用平均值，是因为话量本身偶尔爆一次，
+     平均值会被那一次拽歪，之后就再也报不出同样的事。
+
+     阈值是拿 74 天真实数据调出来的，目标是「几天才报一条」而不是天天响：
+       · 单格突增  ≥ 中位+5×MAD 且 ≥ 中位×3 且 ≥12 通  → 74 天报 13 次
+       · 漏接扎堆  单格漏接 ≥ 当天该渠道漏接的 40% 且 ≥5 通 → 平均每天 0.6 次
+       · 连续爬升  连续 3 格递增、末格 ≥ 首格×2.5 且 ≥15 通，**并且末格相对同时段
+                   基线也偏高** —— 少了最后这条，早上开工和午休后回升全会被报出来
+                   （那是作息不是异常），实测 2.11 条/天 降到 0.12 条/天。
+     放宽一档（3×MAD/2倍）会变成平均每天 1.9 条，那就成噪音了，人会直接忽略。
+
+     只在**单日**视图下算。跨天区间里每格是多天累加，和单日基线不是一回事，
+     硬比会满屏报警。 */
+  var ALERT_MIN_DAYS = 10;      // 历史样本少于这个数就不判（基线不可靠）
+
+  function medOf(a) {
+    if (!a.length) return 0;
+    var s = a.slice().sort(function (x, y) { return x - y; });
+    var h = s.length >> 1;
+    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
+  }
+
+  /* 某个 (牌照显示名, 渠道, 时段) 的历史基线。
+     逐日遍历 D.data 现算 —— 74 天 × 4 块 × 24 格量级很小，不值得预先缓存。 */
+  var baseCache = {};
+  function baseline(name, ch, i) {
+    var key = name + '|' + ch + '|' + i;
+    if (baseCache[key]) return baseCache[key];
+    var vals = [];
+    D.days.forEach(function (d) {
+      var blocks = D.data[d];
+      if (!blocks) return;
+      D.groups.forEach(function (g, gi) {
+        var b = blocks[gi];
+        if (!b) return;
+        var units = [{ n: g.name, b: b }];
+        (b.m || []).forEach(function (ms) { units.push({ n: ms.n, b: ms }); });
+        units.forEach(function (u) {
+          if (u.n !== name) return;
+          var r = (u.b.r || [])[i];
+          if (!r) return;
+          if (!(ch === 'p' ? r[PIN] : r[OIN])) return;   // 非服务时段不进基线
+          vals.push(ch === 'p' ? r[0] + r[1] : r[2] + r[3]);
+        });
+      });
+    });
+    var med = medOf(vals);
+    var mad = medOf(vals.map(function (v) { return Math.abs(v - med); })) || 1;
+    return (baseCache[key] = { n: vals.length, med: med, mad: mad });
+  }
+
+  function findAlerts(days) {
+    if (days.length !== 1) return [];           // 只在单日视图下判，见上面说明
+    var out = [];
+    panels.forEach(function (p) {
+      var units = [{ n: p.name, b: p.b }];
+      if (p.multi) {
+        units.length = 0;
+        (p.b.m || []).forEach(function (ms) { units.push({ n: ms.n, b: ms }); });
+      }
+      units.forEach(function (u) {
+        [['p', '电话', 0, 1, PIN], ['o', '在线', 2, 3, OIN]].forEach(function (cfg) {
+          var ch = cfg[0], lab = cfg[1], ai = cfg[2], mi = cfg[3], ini = cfg[4];
+          var rows = u.b.r || [];
+          var dayMiss = 0;
+          rows.forEach(function (r) { if (r[ini]) dayMiss += r[mi]; });
+
+          rows.forEach(function (r, i) {
+            if (!r[ini]) return;
+            var vol = r[ai] + r[mi];
+
+            var bl = baseline(u.n, ch, i);
+            if (bl.n >= ALERT_MIN_DAYS && vol >= bl.med + 5 * bl.mad &&
+                vol >= bl.med * 3 && vol >= 12) {
+              out.push({ k: '话量突增', s: vol,
+                t: u.n + ' ' + lab + ' <b>' + D.labels[i] + '</b> 来访 <b>' + vol +
+                   '</b> 通，平时这个点大约 <b>' + bl.med + '</b> 通，接通率 ' +
+                   (r[ai] / vol * 100).toFixed(0) + '%。' });
+            }
+
+            if (dayMiss >= 5 && r[mi] >= 5 && r[mi] >= dayMiss * 0.4) {
+              out.push({ k: '漏接集中', s: r[mi],
+                t: u.n + ' ' + lab + ' 漏接集中在 <b>' + D.labels[i] + '</b>：<b>' +
+                   r[mi] + '</b> 通，占当天 ' + Math.round(r[mi] / dayMiss * 100) + '%。' });
+            }
+          });
+
+          for (var i = 2; i < rows.length; i++) {
+            if (!rows[i][ini] || !rows[i - 1][ini] || !rows[i - 2][ini]) continue;
+            var v0 = rows[i - 2][ai] + rows[i - 2][mi],
+                v1 = rows[i - 1][ai] + rows[i - 1][mi],
+                v2 = rows[i][ai] + rows[i][mi];
+            if (!(v0 >= 3 && v0 < v1 && v1 < v2 && v2 >= v0 * 2.5 && v2 >= 15)) continue;
+            /* 光看「自己比自己高」不行 —— 早上开工、午休后回升，话量本来就该爬，
+               那是作息不是异常，不加这道约束会变成平均每天 2 条全是开工时段的废话。
+               末格还得相对**同时段历史基线**偏高，才算真的反常（实测 2.11 → 0.12 条/天）。 */
+            var bl2 = baseline(u.n, ch, i);
+            if (bl2.n < ALERT_MIN_DAYS) continue;
+            if (!(v2 >= bl2.med + 3 * bl2.mad && v2 >= bl2.med * 1.8)) continue;
+            out.push({ k: '持续爬升', s: v2,
+              t: u.n + ' ' + lab + ' 从 <b>' + D.labels[i - 2] + '</b> 起连续三个时段走高：' +
+                 v0 + ' → ' + v1 + ' → <b>' + v2 + '</b> 通（平时这个点约 ' +
+                 bl2.med + ' 通）。' });
+          }
+        });
+      });
+    });
+    out.sort(function (a, b) { return a.k === b.k ? b.s - a.s : (a.k < b.k ? -1 : 1); });
+    return out;
+  }
+
+  function renderAlerts(days) {
+    var box = document.getElementById('alerts');
+    var list = findAlerts(days);
+    if (!list.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="ah">这天有几处值得看一眼（自动挑的，不进截图）：</div><ul>' +
+      list.map(function (a) {
+        return '<li><span class="tag">' + a.k + '</span>' + a.t + '</li>';
+      }).join('') + '</ul>';
   }
 
   /* 跨午夜的服务时间要写明「次日」，否则 08:00–05:00 看着像时间倒退。
@@ -1112,7 +1255,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       document.getElementById('daysum').textContent = '';
       app.innerHTML = '<section class="panel"><div class="pname">没有数据</div>' +
         '<p class="psvc" style="text-align:left">所选范围内没有已抓取的日期，换个范围试试。</p></section>';
-      syncChips(); return;
+      syncChips(); renderAlerts([]); return;
     }
 
     panels = panelsOf(aggregate(days));
@@ -1338,6 +1481,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       });
     });
 
+    renderAlerts(days);
     syncChips();
   }
 
@@ -1522,7 +1666,11 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
     'TBHK 和 TBAU＋TFNZ 是<b>双技能</b>：同一批人既接电话又接在线，所以人力只有一个数' +
     '（TBHK 5 人；TBAU＋TFNZ 合并看 4 人、拆开单看各 3 人），改一个框另一个会跟着走。<br>' +
     '区间条上的数字是该区间全部牌照的漏接总量，点击可切换；接通率低于 ' +
-    (D.alert * 100).toFixed(0) + '% 的时段标红（和说明里「写原因」的线是同一条）。';
+    (D.alert * 100).toFixed(0) + '% 的时段标红（和说明里「写原因」的线是同一条）。<br>' +
+    '页面最下面的<b>异常提示</b>只在看单日时出现，自动挑出三类值得看一眼的波动：' +
+    '某时段话量突然比平时高出一大截、漏接扎堆在一个时段、连续三个时段一路走高。' +
+    '「平时大约多少」取同牌照同时段的历史中位数，所以开工时段的正常上涨不会被报。' +
+    '没检出就整块不显示，<b>也不进截图</b>。';
 
   applyShot();
   setMode('day');
