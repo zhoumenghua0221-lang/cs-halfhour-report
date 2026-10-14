@@ -335,6 +335,9 @@ footer { color: var(--ink-3); font-size: 11.5px; margin-top: 22px; line-height: 
       <button class="btn" id="copyday">复制本区间全部牌照</button>
       <button class="btn" id="copysum">复制全部说明</button>
       <button class="btn" id="copyall">复制逐日全部数据</button>
+      <button class="btn" id="exportprefs">导出我填的内容</button>
+      <button class="btn" id="importprefs">导入</button>
+      <input type="file" id="prefsfile" accept=".json,application/json" hidden>
       <button class="btn" id="shotbtn" aria-pressed="false">截图模式</button>
       <button class="btn" id="shotall">一键截图（每牌照一张）</button>
       <span class="meta" id="daysum"></span>
@@ -1677,6 +1680,70 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
     });
     copy(toTsv(rows), ev.currentTarget, rows.length - 1);
   };
+  /* ── 我填的内容：导出 / 导入 ──────────────────────────
+     为什么要有：人力、请假、邮件量、原因说明都存在**这台机器的浏览器**里
+     （localStorage），换电脑、换浏览器、清站点数据就没了。而且做汇总时，
+     导出的数据表只含抓来的数，不含这些手填内容。
+
+     做法是「导出成一个文件，需要时再导入」——
+        · 导出：把 P 整个存成 JSON 下载，文件名带日期，一眼知道是哪天的备份。
+        · 导入：**合并**而不是覆盖（见下），所以可以按周/按月导几份进来累积。
+     页面是静态托管的，没有后端，写不回服务器；但有了这个闭环，
+     换机器时导一次就能接着用，汇总时也有完整的字段。
+
+     合并规则（每条都选了「宁可不动已有的」那一侧）：
+        · 键相同  → 以**本地现有值**为准，不用文件里的（文件是旧的备份，
+          本地是你刚敲进去的，后者更新）。想强制覆盖就用文件里的空值留着——
+          这一点写在提示里，免得有人以为导入没生效。
+        · 键只在文件里有 → 收进来（典型场景：换新电脑，导入旧备份）
+        · 键只在本地有   → 保留（典型场景：导入一份上周的备份，不冲掉本周新填的） */
+  function prefsSnapshot() {
+    return { v: 1, saved_at: new Date().toISOString().slice(0, 16).replace('T', ' '),
+             hc: P.hc, lv: P.lv, ml: P.ml, why: P.why, split: P.split };
+  }
+  document.getElementById('exportprefs').onclick = function (ev) {
+    var o = prefsSnapshot();
+    var n = Object.keys(o.hc).length + Object.keys(o.lv).length +
+            Object.keys(o.ml).length + Object.keys(o.why).length;
+    if (!n) { toast('还没有填过内容，没什么可导出的'); return; }
+    var blob = new Blob([JSON.stringify(o, null, 1)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = '时段报表-我填的内容-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    toast('已导出 ' + n + ' 项（人力/请假/邮件量/原因说明），存到下载文件夹');
+  };
+  document.getElementById('importprefs').onclick = function () {
+    document.getElementById('prefsfile').click();
+  };
+  document.getElementById('prefsfile').addEventListener('change', function (ev) {
+    var f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    var r = new FileReader();
+    r.onload = function () {
+      var o;
+      try { o = JSON.parse(r.result); } catch (e) { toast('这个文件读不出来，确认是导出的那份 JSON'); return; }
+      if (!o || typeof o !== 'object') { toast('文件内容不是预期的格式'); return; }
+      var added = 0;
+      ['hc', 'lv', 'ml', 'why', 'split'].forEach(function (k) {
+        var src = o[k]; if (!src || typeof src !== 'object') return;
+        Object.keys(src).forEach(function (key) {
+          // 本地已有的不动（本地更新），只补文件里独有/本地没有的
+          if (!Object.prototype.hasOwnProperty.call(P[k], key) || P[k][key] === '' ||
+              P[k][key] === undefined || P[k][key] === null) {
+            P[k][key] = src[key]; added++;
+          }
+        });
+      });
+      savePrefs(); render();
+      toast(added ? '导入完成，补进 ' + added + ' 项；本地已有的保持不变'
+                  : '文件里的内容本地都有，没有新增');
+    };
+    r.readAsText(f);
+    ev.target.value = '';        // 同一个文件能再导一次（改完 JSON 重试时用得上）
+  });
+
   /* 「复制全部说明」：五块的说明连起来，就是可以直接发群里的那整段。
      开头带一行日期，和人工写的那份格式一致。 */
   document.getElementById('copysum').onclick = function (ev) {
