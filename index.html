@@ -240,6 +240,18 @@ body.shot #alerts { display: none !important; }
 .sum .sh { color: var(--ink); font-weight: 600; }
 .sum b { font-family: var(--mono); color: var(--ink); font-weight: 600; }
 .sum .lo { color: var(--miss-ink); }
+/* 红字那行可点开编辑。加下划虚线提示「这里能改」，但别太扎眼 --
+   截图里这行还要正常显示，所以只在鼠标移上去时明显起来。 */
+.sum .lo[data-edit] { cursor: text; border-bottom: 1px dashed transparent; }
+.sum .lo[data-edit]:hover { border-bottom-color: var(--miss-ink); }
+.sum .lo .edited-tag { font-size: 10.5px; color: var(--ink-3); margin-left: 4px; }
+body.shot .sum .lo .edited-tag { display: none; }
+.noteedit {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px;
+  font-family: var(--sans); line-height: 1.6; resize: vertical; min-height: 3.2em;
+  color: var(--ink); background: var(--surface);
+  border: 1px solid var(--ans); border-radius: 6px; padding: 4px 7px;
+}
 /* 口径小字：解释漏接取的是 ivr 日报真值，和上表逐格加总差几通 */
 .sum .fine { color: var(--ink-3); font-size: 11.5px; }
 /* 合并块整块的人力行：跟在两段量后面，空一行隔开，表示它说的是整块不是最后那个牌照 */
@@ -425,7 +437,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
   // 人均按在岗人力算 = hc - lv，见 perAgent()。
   // ml = 邮件咨询量，why = 接通率低时的原因说明。这两个都按「牌照|区间」存，
   // 因为它们是一天一个数、一天一句话，不像人力那样长期不变。
-  var P = { hc: {}, lv: {}, ml: {}, why: {}, split: {} };
+  var P = { hc: {}, lv: {}, ml: {}, why: {}, split: {}, note: {} };
   try {
     var raw = localStorage.getItem(LS);
     if (raw) {
@@ -433,7 +445,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       if (o && typeof o === 'object') {
         P.hc = o.hc || {}; P.lv = o.lv || {};
         P.ml = o.ml || {}; P.why = o.why || {};
-        P.split = o.split || {};
+        P.split = o.split || {}; P.note = o.note || {};
       }
     }
   } catch (e) {}
@@ -977,7 +989,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       }
       var why = getWhy(u.name, rk);
       if (why) s += why.replace(/\s+$/, '');
-      L.push({ t: s, lo: true });
+      L.push({ t: s, lo: true, k: lab });
     });
     return L;
   }
@@ -1032,7 +1044,26 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
     var body = us.map(function (u) {
       return '<div class="sh">' + esc(u.name + '　' + dayLabel(days)) + '</div>' +
         unitLines(u, rk).map(function (l) {
-          return '<div' + (l.lo ? ' class="lo"' : '') + '>' + esc(l.t) + '</div>';
+          /* 低于 90% 那几行（.lo）点一下就变成可编辑 —— 用户要能把自动生成的那段
+             改成自己的话。data-edit / data-lk 只在这一行上，不影响别的说明行。
+
+             改过的行整行用改的（P.note），不再显示自动生成的内容 —— 否则
+             「自动那半句 + 人改的半句」会拼在一起，读着自相矛盾。 */
+          /* 只有「接通率说明」那几行给了 l.k（'电话' / '在线'）—— 总量行虽然
+             也会因为低于 90% 标红，但它是纯事实（总量/接起/率），不该改。
+             用「有没有 k」来区分：有 k 才可编辑。 */
+          var editable = !!(l.lo && l.k);
+          if (!editable) {
+            return '<div' + (l.lo ? ' class="lo"' : '') + '>' + esc(l.t) + '</div>';
+          }
+          var nk = u.name + '|' + rk + '|' + l.k;
+          var custom = Object.prototype.hasOwnProperty.call(P.note, nk);
+          var txt = custom ? P.note[nk] : l.t;
+          return '<div class="lo' + (custom ? ' edited' : '') + '" data-edit="1"' +
+                 ' data-lk="' + esc(u.name) + '|' + esc(l.k) + '"' +
+                 ' title="' + (custom ? '已手改，点击可再改' : '点击可修改') + '">' +
+                 esc(txt) +
+                 (custom ? '<span class="edited-tag">（已手改）</span>' : '') + '</div>';
         }).join('');
     }).join('');
     var bh = blockHcLine(p, rk);
@@ -1414,6 +1445,41 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       /* 说明块：数字全是算出来的，改了人力/请假/邮件量都要重算一遍。
          只换 .sum 那一块的内容，不整页 render() —— render 会重建输入框、
          把光标和正在敲的半截字顶掉。 */
+      /* ── 红字那行点一下就能改 ────────────────────────────
+         自动生成的那句「接通率说明」原来只能看不能动。用户要能改成自己的话
+         （2026-10-20）。做法：点一下把这一行换成 textarea，回车/失焦存，
+         Esc 放弃。
+
+         覆盖值存在 P.note，键是「牌照|区间|电话或在线」——按区间存，和邮件量、
+         原因说明一个脾气（一天一句，不是长期不变）。**改过就整行用改的**，
+         不再拼接自动生成的内容，否则人改完又被自动那半句追回来，很乱。
+
+         事件委托挂在 .sum 上：说明块每次 redrawSum 都会重建 DOM，
+         直接给每个 div 绑监听会被冲掉。 */
+      el.querySelector('.sum').addEventListener('click', function (ev) {
+        var div = ev.target.closest('[data-edit]');
+        if (!div || div.querySelector('textarea')) return;          // 已经在编辑就不重复开
+        var lk = div.dataset.lk || '';
+        var key = p.name + '|' + rk + '|' + lk.split('|').slice(1).join('|');
+        var old = P.note[key] !== undefined ? P.note[key] : div.textContent;
+        var ta = document.createElement('textarea');
+        ta.className = 'noteedit';
+        ta.value = old;
+        div.textContent = '';
+        div.appendChild(ta);
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+        var done = function (save) {
+          if (save) { P.note[key] = ta.value; savePrefs(); }
+          redrawSum();
+        };
+        ta.addEventListener('blur', function () { done(true); });
+        ta.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape') { e.preventDefault(); done(false); }
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); done(true); }
+        });
+      });
+
       var redrawSum = function () {
         var box = el.querySelector('.sum');
         if (!box) return;
@@ -1701,7 +1767,8 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
         · 键只在本地有   → 保留（典型场景：导入一份上周的备份，不冲掉本周新填的） */
   function prefsSnapshot() {
     return { v: 1, saved_at: new Date().toISOString().slice(0, 16).replace('T', ' '),
-             hc: P.hc, lv: P.lv, ml: P.ml, why: P.why, split: P.split };
+             hc: P.hc, lv: P.lv, ml: P.ml, why: P.why, split: P.split,
+             note: P.note };
   }
   document.getElementById('exportprefs').onclick = function (ev) {
     var o = prefsSnapshot();
@@ -1728,7 +1795,7 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       try { o = JSON.parse(r.result); } catch (e) { toast('这个文件读不出来，确认是导出的那份 JSON'); return; }
       if (!o || typeof o !== 'object') { toast('文件内容不是预期的格式'); return; }
       var added = 0;
-      ['hc', 'lv', 'ml', 'why', 'split'].forEach(function (k) {
+      ['hc', 'lv', 'ml', 'why', 'split', 'note'].forEach(function (k) {
         var src = o[k]; if (!src || typeof src !== 'object') return;
         Object.keys(src).forEach(function (key) {
           // 本地已有的不动（本地更新），只补文件里独有/本地没有的
