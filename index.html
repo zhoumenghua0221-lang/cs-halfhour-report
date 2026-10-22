@@ -763,7 +763,11 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
                    (r[ai] / vol * 100).toFixed(0) + '%。' });
             }
 
-            if (dayMiss >= 5 && r[mi] >= 5 && r[mi] >= dayMiss * 0.4) {
+            /* 门槛再加一条：当天该渠道漏接至少 8 通。
+               否则「6 通里有 6 通集中在同一格」会报「占 100%」——
+               数字没错，但量太小，没有看的价值（10-19 那次 TFNZ 就是 6/6）。
+               漏接本来就稀少的牌照，每个都报一条只会淹掉真信号。 */
+            if (dayMiss >= 8 && r[mi] >= 5 && r[mi] >= dayMiss * 0.4) {
               /* 「占当天 67%」这个说法有歧义 —— 分母只是**本渠道**（在线）全天的漏接，
                  不是当天电话+在线的全部。用户 2026-10-22 就按字面理解成了
                  「占当天全部漏接的 67%」，觉得对不上。改成写清分母是什么。 */
@@ -775,10 +779,10 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
           });
 
           /* 连续 6 个时段（3 小时）的合计 vs 历史同期均值。
-             阈值 1.5 倍：拿 9 月以来全部工作日验过，37 个工作日里只报 2 次
-             （10-21 是 2.08 倍、10-05 是 1.50 倍），frequency 合适，
-             而且报出来的都是真事 —— 不是天天响的噪音。 */
-          var SPAN = 6, SPAN_RATIO = 1.5, SPAN_MIN = 40;
+             阈值定 1.7 倍：先试过 1.5，太松 —— 10-19 那天一次报了 7 条，
+             多数是「涨了五成」这种本来就常见的波动，看着像刷屏。1.7 之后
+             抽查的 10 天里最多 3 条，报出来的都是真放量。 */
+          var SPAN = 6, SPAN_RATIO = 1.7, SPAN_MIN = 40, best = null;
           for (var si = 0; si + SPAN <= rows.length; si++) {
             var seg = 0, ok = true;
             for (var k = si; k < si + SPAN; k++) {
@@ -790,24 +794,19 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
             if (!sb || sb.mean <= 0) continue;
             var sr = seg / sb.mean;
             if (sr < SPAN_RATIO) continue;
-            /* 只报「这一段是全天最严重的」—— 否则滑动窗口会在同一段上
-               连报六七条（起点每挪一格就一条），把提示淹掉。
-               判断：这段的比值比它前面那些窗口都高才报。 */
-            var isPeak = true;
-            for (var pj = si + 1; pj + SPAN <= rows.length; pj++) {
-              var seg2 = 0, ok2 = true;
-              for (var k2 = pj; k2 < pj + SPAN; k2++) {
-                if (!rows[k2][ini]) { ok2 = false; break; }
-                seg2 += rows[k2][ai] + rows[k2][mi];
-              }
-              var sb2 = ok2 && seg2 >= SPAN_MIN ? spanBaseline(u.n, ch, pj, SPAN) : null;
-              if (sb2 && sb2.mean > 0 && seg2 / sb2.mean > sr) { isPeak = false; break; }
+            /* 去重：滑动窗口每一步都算一次，同一段会连着报六七条
+               （起点挪一格就是一条），提示会被淹掉 —— 实测 10-21 一次报了 12 条。
+               做法：每个 (牌照,渠道) 只保留**最严重的一条**，其余丢掉。
+               用变量记在本轮里，等内层循环走完再统一 push。 */
+            if (!best || sr > best.sr) {
+              best = { sr: sr, si: si, seg: seg, mean: sb.mean };
             }
-            if (!isPeak) continue;
-            out.push({ k: '整段放量', s: seg,
-              t: u.n + ' ' + lab + ' <b>' + D.labels[si] + '</b> 起 ' + SPAN +
-                 ' 个时段（3 小时）来访 <b>' + seg + '</b> 通，是平时（约 ' +
-                 Math.round(sb.mean) + ' 通）的 <b>' + sr.toFixed(1) + '</b> 倍。' });
+          }
+          if (best) {
+            out.push({ k: '整段放量', s: best.sr,
+              t: u.n + ' ' + lab + ' <b>' + D.labels[best.si] + '</b> 起 ' + SPAN +
+                 ' 个时段（3 小时）来访 <b>' + best.seg + '</b> 通，是平时（约 ' +
+                 Math.round(best.mean) + ' 通）的 <b>' + best.sr.toFixed(1) + '</b> 倍。' });
           }
 
           for (var i = 2; i < rows.length; i++) {
@@ -831,6 +830,14 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
       });
     });
     out.sort(function (a, b) { return a.k === b.k ? b.s - a.s : (a.k < b.k ? -1 : 1); });
+    /* 「整段放量」最多留 2 条。一次全局性的量涨会让每个牌照、每个渠道各报一条
+       （10-21 那天报了 5 条同类的），读起来像刷屏，反而看不到别的信号。
+       按严重程度取前 2 就够了 —— 真要细看，表格里逐时段都有。 */
+    var kept = 0;
+    out = out.filter(function (a) {
+      if (a.k !== '整段放量') return true;
+      return ++kept <= 2;
+    });
     return out;
   }
 
