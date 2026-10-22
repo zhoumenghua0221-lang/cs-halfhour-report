@@ -690,6 +690,50 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
     return (baseCache[key] = { n: vals.length, med: med, mad: mad });
   }
 
+  /* 连续 N 个时段的合计 vs 历史同期均值。
+     为什么单独做一个：单个半小时的量看着不高（10-21 TBSG 在线最高才 37 通），
+     但**整段一起翻倍**才是真异常 —— 那天 11:30-14:30 合计 147 通，
+     历史工作日平均只有 70.6，2.08 倍，是全期最异常的一天。
+     可当时三个单点规则一个都没报（最高 37 没到「中位×3」），用户自己看出来的。
+
+     做法：把某牌照某渠道连续 span 个时段的量加起来，和「同样这几个时段的
+     历史均值之和」比。用均值不用中位数，是因为比的是**段合计**，
+     段合计本身已经平滑过，均值更直观（也更好跟用户解释「平均多少」）。 */
+  var SPAN_BASE = {};
+
+  function spanBaseline(name, ch, start, span) {
+    var key = name + '|' + ch + '|' + start + '|' + span;
+    if (SPAN_BASE[key]) return SPAN_BASE[key];
+    var sums = [];
+    D.days.forEach(function (d) {
+      var blocks = D.data[d];
+      if (!blocks) return;
+      D.groups.forEach(function (g, gi) {
+        var b = blocks[gi];
+        if (!b) return;
+        var units = [{ n: g.name, b: b }];
+        (b.m || []).forEach(function (ms) { units.push({ n: ms.n, b: ms }); });
+        units.forEach(function (u) {
+          if (u.n !== name) return;
+          var tot = 0;
+          for (var k = start; k < start + span; k++) {
+            var r = (u.b.r || [])[k];
+            if (!r) return;
+            if (!(ch === 'p' ? r[PIN] : r[OIN])) return;   // 有非服务时段就整段不计
+            tot += ch === 'p' ? r[0] + r[1] : r[2] + r[3];
+          }
+          sums.push(tot);
+        });
+      });
+    });
+    if (sums.length < ALERT_MIN_DAYS) return (SPAN_BASE[key] = null);
+    var mean = sums.reduce(function (a, b) { return a + b; }, 0) / sums.length;
+    var sd = Math.sqrt(sums.reduce(function (a, b) {
+      return a + (b - mean) * (b - mean);
+    }, 0) / sums.length);
+    return (SPAN_BASE[key] = { n: sums.length, mean: mean, sd: sd });
+  }
+
   function findAlerts(days) {
     if (days.length !== 1) return [];           // 只在单日视图下判，见上面说明
     var out = [];
@@ -729,6 +773,42 @@ var D = {"days":["2026-08-01","2026-08-02","2026-08-03","2026-08-04","2026-08-05
                    ' 通）的 ' + Math.round(r[mi] / dayMiss * 100) + '%。' });
             }
           });
+
+          /* 连续 6 个时段（3 小时）的合计 vs 历史同期均值。
+             阈值 1.5 倍：拿 9 月以来全部工作日验过，37 个工作日里只报 2 次
+             （10-21 是 2.08 倍、10-05 是 1.50 倍），frequency 合适，
+             而且报出来的都是真事 —— 不是天天响的噪音。 */
+          var SPAN = 6, SPAN_RATIO = 1.5, SPAN_MIN = 40;
+          for (var si = 0; si + SPAN <= rows.length; si++) {
+            var seg = 0, ok = true;
+            for (var k = si; k < si + SPAN; k++) {
+              if (!rows[k][ini]) { ok = false; break; }
+              seg += rows[k][ai] + rows[k][mi];
+            }
+            if (!ok || seg < SPAN_MIN) continue;
+            var sb = spanBaseline(u.n, ch, si, SPAN);
+            if (!sb || sb.mean <= 0) continue;
+            var sr = seg / sb.mean;
+            if (sr < SPAN_RATIO) continue;
+            /* 只报「这一段是全天最严重的」—— 否则滑动窗口会在同一段上
+               连报六七条（起点每挪一格就一条），把提示淹掉。
+               判断：这段的比值比它前面那些窗口都高才报。 */
+            var isPeak = true;
+            for (var pj = si + 1; pj + SPAN <= rows.length; pj++) {
+              var seg2 = 0, ok2 = true;
+              for (var k2 = pj; k2 < pj + SPAN; k2++) {
+                if (!rows[k2][ini]) { ok2 = false; break; }
+                seg2 += rows[k2][ai] + rows[k2][mi];
+              }
+              var sb2 = ok2 && seg2 >= SPAN_MIN ? spanBaseline(u.n, ch, pj, SPAN) : null;
+              if (sb2 && sb2.mean > 0 && seg2 / sb2.mean > sr) { isPeak = false; break; }
+            }
+            if (!isPeak) continue;
+            out.push({ k: '整段放量', s: seg,
+              t: u.n + ' ' + lab + ' <b>' + D.labels[si] + '</b> 起 ' + SPAN +
+                 ' 个时段（3 小时）来访 <b>' + seg + '</b> 通，是平时（约 ' +
+                 Math.round(sb.mean) + ' 通）的 <b>' + sr.toFixed(1) + '</b> 倍。' });
+          }
 
           for (var i = 2; i < rows.length; i++) {
             if (!rows[i][ini] || !rows[i - 1][ini] || !rows[i - 2][ini]) continue;
